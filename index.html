@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Infra MUNISAG</title>
+<meta name="description" content="Gestión de las redes de agua, cloaca, calles y caminos de San Andrés de Giles">
+<meta name="theme-color" content="#16212B">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="iconos/icono-192.png">
+<link rel="apple-touch-icon" href="iconos/icono-192.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="vendor/leaflet-geoman.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body data-red="agua">
+<header class="barra">
+  <div class="marca">
+    <img src="iconos/marca.svg" alt="" width="30" height="30">
+    <div><strong>Infra MUNISAG</strong><span>San Andrés de Giles</span></div>
+  </div>
+  <nav class="pestanas" id="pestanas" role="tablist" aria-label="Redes"></nav>
+  <div class="estado">
+    <button id="btnSync" class="chip" type="button" data-acc="cuenta"></button>
+    <button id="btnCuenta" class="cuenta" type="button" data-acc="cuenta" aria-label="Cuenta y sincronización"></button>
+  </div>
+</header>
+
+<main>
+  <aside id="panel" aria-live="polite"></aside>
+  <div class="lienzo">
+    <div id="mapa"></div>
+    <div id="barraEdicion" class="barra-edicion" hidden></div>
+    <button id="btnPanel" class="btn-panel" type="button" aria-label="Mostrar u ocultar el panel"></button>
+  </div>
+</main>
+
+<div id="acceso" class="acceso" hidden></div>
+<div id="avisos" class="avisos" role="status"></div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet-geoman.js"></script>
+<script src="vendor/supabase.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
