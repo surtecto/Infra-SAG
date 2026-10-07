@@ -2,8 +2,8 @@
 // Mientras estos dos valores estén vacíos, la app funciona en modo demostración:
 // los datos quedan solo en este equipo y el perfil se elige a mano.
 // Los valores salen de Supabase > Project Settings > API (ver LEEME.md).
-export const SUPABASE_URL = '';
-export const SUPABASE_ANON_KEY = '';
+export const SUPABASE_URL = 'https://evbqzkoxojtocrqizrtb.supabase.co/rest/v1/';
+export const SUPABASE_ANON_KEY = 'sb_publishable_60BozW_3TZbYqYmDzPla8g_MyeKaTQA';
 
 export const APP = {
   nombre: 'Infra MUNISAG',
