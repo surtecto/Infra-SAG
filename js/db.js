@@ -1,6 +1,6 @@
 // Almacén local (IndexedDB): permite trabajar sin señal y guarda lo que falta sincronizar.
 const NOMBRE = 'infra-munisag';
-const VERSION = 1;
+const VERSION = 2;
 let _db;
 
 export function abrir() {
@@ -8,11 +8,9 @@ export function abrir() {
     const r = indexedDB.open(NOMBRE, VERSION);
     r.onupgradeneeded = () => {
       const d = r.result;
-      d.createObjectStore('elementos', { keyPath: 'id' });
-      d.createObjectStore('intervenciones', { keyPath: 'id' });
-      d.createObjectStore('pendientes', { keyPath: 'k' });
-      d.createObjectStore('fotos', { keyPath: 'path' });
-      d.createObjectStore('meta', { keyPath: 'k' });
+      for (const [n, k] of [['elementos', 'id'], ['intervenciones', 'id'], ['pendientes', 'k'], ['fotos', 'path'], ['meta', 'k'], ['parcelas', 'id']]) {
+        if (!d.objectStoreNames.contains(n)) d.createObjectStore(n, { keyPath: k });
+      }
     };
     r.onsuccess = () => { _db = r.result; ok(_db); };
     r.onerror = () => err(r.error);

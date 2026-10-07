@@ -10,6 +10,7 @@ const ui = {
   ocultos: new Set(), soloFaltantes: false, filtroInt: 'activas',
   borrador: null, refs: new Set(JSON.parse(localStorage.getItem('refs') || '["manzanas"]')),
   modo: null, pos: null, clicElemento: null,
+  parcOn: localStorage.getItem('parc') === '1', parcModo: localStorage.getItem('parcModo') || 'borde', parcSel: null,
 };
 if (!REDES[ui.red]) ui.red = 'agua';
 
@@ -85,6 +86,8 @@ const capaRed = L.layerGroup().addTo(mapa);
 const capaSel = L.layerGroup().addTo(mapa);
 const capaInt = L.layerGroup().addTo(mapa);
 const capaYo = L.layerGroup().addTo(mapa);
+const capaParc = L.layerGroup().addTo(mapa);
+const capaParcSel = L.layerGroup().addTo(mapa);
 const aLatLng = (c) => [c[1], c[0]];
 
 let referencia = null;
@@ -151,6 +154,93 @@ function pintarInt() {
     }).on('click', (ev) => { if (ui.modo) return; L.DomEvent.stopPropagation(ev); abrirIntervencion(i.id); }).addTo(capaInt);
   }
 }
+
+// ---------- parcelas (capa de consulta) ----------
+// Se dibujan solo las que caen dentro de la vista y a partir de cierto zoom, para que el celular no se trabe.
+// Usan el mismo lienzo que la red y quedan siempre por debajo de ella.
+const ZOOM_PARC = 16;
+const SERV = { si: '#3E9B8F', no: '#E08E2B' };
+const parcDib = new Map();
+let parcIdx = null, parcVer = 0, parcTimer = null;
+const poligonos = (g) => g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
+function parcIndice() {
+  if (parcIdx && parcIdx.v === parcVer) return parcIdx.l;
+  const l = [];
+  for (const p of est.parcelas.values()) {
+    let x0 = 180, y0 = 90, x1 = -180, y1 = -90;
+    for (const poly of poligonos(p.geom)) for (const [x, y] of poly[0]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    l.push({ p, x0, y0, x1, y1 });
+  }
+  parcIdx = { v: parcVer, l }; return l;
+}
+function estiloParc(p) {
+  const b = { color: '#6B5E4B', weight: 1, opacity: 0.85, fill: true, fillColor: '#FFFFFF', fillOpacity: 0.03, pmIgnore: true };
+  if (ui.parcModo === 'agua' || ui.parcModo === 'cloaca') return { ...b, fillColor: (ui.parcModo === 'agua' ? p.agua : p.cloaca) ? SERV.si : SERV.no, fillOpacity: 0.4 };
+  return b;
+}
+const latlngsParc = (g) => L.GeoJSON.coordsToLatLngs(g.coordinates, g.type === 'Polygon' ? 1 : 2);
+function pintarParc() {
+  if (!ui.parcOn || mapa.getZoom() < ZOOM_PARC || !est.parcelas.size) { capaParc.clearLayers(); parcDib.clear(); return; }
+  const b = mapa.getBounds().pad(0.15), w = b.getWest(), e = b.getEast(), s = b.getSouth(), n = b.getNorth();
+  const dentro = new Set();
+  for (const r of parcIndice()) {
+    if (r.x1 < w || r.x0 > e || r.y1 < s || r.y0 > n) continue;
+    dentro.add(r.p.id); if (dentro.size >= 9000) break;
+  }
+  for (const [id, capa] of parcDib) if (!dentro.has(id)) { capaParc.removeLayer(capa); parcDib.delete(id); }
+  for (const id of dentro) {
+    if (parcDib.has(id)) continue;
+    const p = est.parcelas.get(id);
+    const capa = L.polygon(latlngsParc(p.geom), estiloParc(p));
+    capa.on('click', (ev) => { if (ui.modo) return; L.DomEvent.stopPropagation(ev); abrirParcela(id); });
+    capa.addTo(capaParc); capa.bringToBack(); parcDib.set(id, capa);
+  }
+}
+function repintarParc() { parcVer++; capaParc.clearLayers(); parcDib.clear(); pintarParc(); pintarParcSel(); }
+function pintarParcSel() {
+  capaParcSel.clearLayers();
+  const p = ui.parcSel && est.parcelas.get(ui.parcSel);
+  if (p && ui.vista === 'parcela') L.polygon(latlngsParc(p.geom), { color: '#FFD400', weight: 4, fill: false, interactive: false, pmIgnore: true }).addTo(capaParcSel);
+}
+mapa.on('moveend', () => { clearTimeout(parcTimer); parcTimer = setTimeout(pintarParc, 120); });
+function distPuntoSeg(q, a, b, kx, ky) {
+  const ax = (a[0] - q[0]) * kx, ay = (a[1] - q[1]) * ky, bx = (b[0] - q[0]) * kx, by = (b[1] - q[1]) * ky;
+  const dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy;
+  const t = l ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l)) : 0;
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+// Distancia desde los vértices de la parcela hasta el tramo más cercano de una red (en metros).
+function distRed(p, red) {
+  const pts = poligonos(p.geom).flatMap((poly) => poly[0]);
+  const kx = 111320 * Math.cos(pts[0][1] * Math.PI / 180), ky = 110574;
+  let mejor = null;
+  for (const e of D.elementosDe(red)) {
+    if (e.geom.type !== 'LineString') continue;
+    const c = e.geom.coordinates;
+    for (let i = 1; i < c.length; i++) for (const q of pts) {
+      const d = distPuntoSeg(q, c[i - 1], c[i], kx, ky);
+      if (!mejor || d < mejor.m) mejor = { m: d, e };
+    }
+  }
+  return mejor;
+}
+const domicilioParc = (p) => [p.calle, p.nro && p.nro !== '0' ? p.nro : ''].filter(Boolean).join(' ');
+function irParcela(id) {
+  const r = parcIndice().find((x) => x.p.id === id); if (!r) return;
+  if (!ui.parcOn) { ui.parcOn = true; localStorage.setItem('parc', '1'); }
+  mapa.fitBounds([[r.y0, r.x0], [r.y1, r.x1]], { maxZoom: 19, padding: [60, 60] });
+  pintarParc(); abrirParcela(id);
+}
+function buscarParcela(texto) {
+  const q = texto.trim().toLowerCase(), cont = $('#resultadosParcela'); if (!cont) return;
+  if (q.length < 3) { cont.innerHTML = ''; return; }
+  const dig = q.replace(/\D/g, ''), res = [];
+  for (const p of est.parcelas.values()) {
+    if ((dig.length >= 3 && (p.partida || '').includes(dig)) || (p.cca || '').toLowerCase().includes(q) || `${p.calle || ''} ${p.nro || ''}`.toLowerCase().includes(q)) { res.push(p); if (res.length >= 8) break; }
+  }
+  cont.innerHTML = res.map((p, i) => `<button data-i="${i}">${h(domicilioParc(p) || 'Sin domicilio')} <small>Partida ${h(p.partida || '—')}</small></button>`).join('') || '<p class="nota">Sin coincidencias.</p>';
+  cont.querySelectorAll('button').forEach((bt) => { bt.onclick = () => irParcela(res[bt.dataset.i].id); });
+}
 function encuadrar(geoms) {
   const pts = geoms.flatMap((g) => g.type === 'Point' ? [g.coordinates] : g.coordinates).map(aLatLng);
   if (!pts.length) return;
@@ -158,7 +248,7 @@ function encuadrar(geoms) {
 }
 mapa.on('click', (ev) => {
   if (ui.modo === 'punto') return ui.alPunto?.({ type: 'Point', coordinates: [r6(ev.latlng.lng), r6(ev.latlng.lat)] });
-  if (!ui.modo && (ui.vista === 'elemento' || ui.vista === 'intervencion')) { ui.selId = null; ir('resumen'); pintarSel(); }
+  if (!ui.modo && (ui.vista === 'elemento' || ui.vista === 'intervencion' || ui.vista === 'parcela')) { ui.selId = null; ui.parcSel = null; ir('resumen'); pintarSel(); pintarParcSel(); }
 });
 
 // GPS
@@ -247,7 +337,8 @@ function editarTrazado(e) {
 
 // ---------- panel ----------
 function ir(vista) { ui.vista = vista; pintarPanel(); $('#panel').scrollTop = 0; }
-function abrirElemento(id) { ui.selId = id; ui.intId = null; document.body.classList.remove('panel-min'); etiquetaPanel(); ir('elemento'); pintarSel(); }
+function abrirElemento(id) { ui.selId = id; ui.intId = null; ui.parcSel = null; pintarParcSel(); document.body.classList.remove('panel-min'); etiquetaPanel(); ir('elemento'); pintarSel(); }
+function abrirParcela(id) { ui.parcSel = id; ui.selId = null; ui.intId = null; document.body.classList.remove('panel-min'); etiquetaPanel(); pintarSel(); ir('parcela'); pintarParcSel(); }
 function abrirIntervencion(id) { ui.intId = id; document.body.classList.remove('panel-min'); etiquetaPanel(); ir('intervencion'); }
 function etiquetaPanel() { $('#btnPanel').textContent = document.body.classList.contains('panel-min') ? 'Mostrar panel' : 'Ampliar mapa'; }
 
@@ -311,6 +402,16 @@ const VISTAS = {
         <div class="lista-int">${ints.slice(0, 40).map(tarjetaInt).join('') || `<p class="vacio">${ui.filtroInt === 'activas' ? 'No hay fallas ni trabajos abiertos en esta red.' : 'Todavía no se registró ninguna intervención.'}</p>`}</div>
         ${ints.length > 40 ? `<p class="nota">Se muestran las 40 más recientes de ${ints.length}.</p>` : ''}
       </div>
+      <div class="sec"><h2>Parcelas${est.parcelas.size ? ` <small class="nota">${est.parcelas.size.toLocaleString('es-AR')}</small>` : ''}</h2>
+        ${est.parcelas.size ? `<label class="interruptor"><input type="checkbox" data-cambio="verParc" ${ui.parcOn ? 'checked' : ''}> Mostrar parcelas en el mapa</label>
+          <div class="campo"><label for="parcModo">Colorear según</label><select id="parcModo" data-cambio="parcModo">
+            ${[['borde', 'Solo el borde'], ['agua', 'Agua corriente'], ['cloaca', 'Cloaca']].map(([k, n]) => `<option value="${k}" ${ui.parcModo === k ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+          ${ui.parcModo !== 'borde' ? (() => { let si = 0; for (const p of est.parcelas.values()) if (ui.parcModo === 'agua' ? p.agua : p.cloaca) si++;
+            return `<div class="leyenda"><div><span class="simb punto" style="--c:${SERV.si}"></span>Con servicio según el SIG<b>${si.toLocaleString('es-AR')}</b></div><div><span class="simb punto" style="--c:${SERV.no}"></span>Sin servicio<b>${(est.parcelas.size - si).toLocaleString('es-AR')}</b></div></div>`; })() : ''}
+          <input class="buscar" id="buscarParcela" type="search" placeholder="Buscar por partida, nomenclatura o calle" autocomplete="off" style="margin-top:10px"><div class="resultados" id="resultadosParcela"></div>
+          <p class="nota">Se dibujan desde el nivel de zoom ${ZOOM_PARC}: acercá el mapa. Tocá una parcela para ver su ficha.</p>`
+        : `<p class="vacio">Todavía no hay parcelas cargadas.${puede.administrar(rol()) ? '</p><p style="margin:10px 0 0"><button class="btn" data-acc="cuenta">Ir a importar las parcelas</button>' : ' Las carga un administrador.'}</p>`}
+      </div>
       <div class="sec"><h2>Referencias</h2>
         ${Object.entries(REFS).map(([k, r]) => `<label class="interruptor" style="margin-top:4px"><input type="checkbox" data-cambio="ref" data-k="${k}" ${ui.refs.has(k) ? 'checked' : ''}> ${h(r.nombre)}</label>`).join('')}
       </div>
@@ -318,6 +419,27 @@ const VISTAS = {
         <button class="btn" data-acc="exportarRed">Red en GeoJSON</button>
         <button class="btn" data-acc="exportarInt">Intervenciones en CSV</button></div>
         <p class="nota">El GeoJSON se abre directamente en QGIS.</p></div>`;
+  },
+
+  parcela() {
+    const p = est.parcelas.get(ui.parcSel);
+    if (!p) return `<div class="cab"><button class="volver" data-acc="volver">‹ Volver a la red</button><h1>Parcela no disponible</h1><p>Todavía no se descargó o fue dada de baja.</p></div>`;
+    const serv = (red, nombre, tiene) => {
+      const d = distRed(p, red);
+      const cerca = d ? `${nf.format(d.m)} m${d.e.props?.calle ? ` (${h(d.e.props.calle)})` : ''}` : '<span class="sd">Sin datos de esa red</span>';
+      const alerta = tiene && d && d.m > 40 ? `<br><span class="falta">Figura con ${nombre} pero la red cargada más cercana está a ${nf.format(d.m)} m: conviene revisarlo.</span>` : '';
+      return `<tr><th>${nombre[0].toUpperCase() + nombre.slice(1)}</th><td>${tiene ? 'Sí' : 'No'} <span class="sd">(según el SIG)</span></td></tr>
+        <tr><th>Red más cercana</th><td>${cerca}${alerta}</td></tr>`;
+    };
+    return `
+      <div class="cab"><button class="volver" data-acc="volver">‹ Volver a la red</button><h1>${h(domicilioParc(p) || 'Parcela sin domicilio')}</h1><p>Partida ${h(p.partida || 'sin dato')}</p></div>
+      <div class="sec"><table class="ficha">
+        <tr><th>Nomenclatura</th><td style="word-break:break-all">${h(p.cca || 'Sin dato')}</td></tr>
+        <tr><th>Tipo</th><td>${h(p.tipo || 'Sin dato')}</td></tr>
+        <tr><th>Superficie</th><td>${tieneDato(p.sup) ? `${nf.format(p.sup)} m²` : 'Sin dato'}</td></tr>
+        <tr><th>Zona del COU</th><td>${h(p.zona || 'Sin dato')}</td></tr>
+        ${serv('agua', 'agua corriente', p.agua)}${serv('cloaca', 'cloaca', p.cloaca)}</table>
+        <p class="nota">Datos del SIG municipal (parcelas 2024). La distancia se mide desde los límites de la parcela hasta los tramos cargados en la app, así que depende de qué tan completo esté el trazado.</p></div>`;
   },
 
   elemento() {
@@ -407,6 +529,7 @@ const VISTAS = {
           <table class="ficha">
             <tr><th>Conexión</th><td>${est.enLinea ? 'Con señal' : 'Sin señal'}</td></tr>
             <tr><th>Cambios por enviar</th><td>${est.pendientes}</td></tr>
+            ${est.parcelas.size ? `<tr><th>Parcelas en este equipo</th><td>${est.parcelas.size.toLocaleString('es-AR')}</td></tr>` : ''}
             <tr><th>Última sincronización</th><td>${est.ultimaSync ? fechaHora(est.ultimaSync) : 'Nunca'}</td></tr>
             ${est.errorSync ? `<tr><th>Último error</th><td>${h(est.errorSync)}</td></tr>` : ''}
           </table>
@@ -422,7 +545,9 @@ const VISTAS = {
       ${nube && puede.administrar(rol()) ? `<div class="sec"><h2>Usuarios</h2><div class="usuarios" id="usuarios"><p class="vacio">Cargando…</p></div>
           <p class="nota">Las cuentas nuevas quedan "sin habilitar" hasta que se les asigna un perfil acá.</p></div>` : ''}
       ${puede.administrar(rol()) ? `<div class="sec"><h2>Capas del SIG</h2><p class="nota" style="margin-top:0">Carga las redes convertidas desde el SIG municipal: elegí el archivo <strong>base.json</strong> de la carpeta datos_sig. No modifica lo que ya esté cargado.</p>
-          <p style="margin:10px 0 0"><label class="btn" style="display:inline-flex;align-items:center">Elegir base.json<input type="file" accept=".json,application/json" data-cambio="importar" hidden></label> <span id="progImp" class="nota"></span></p></div>` : ''}
+          <p style="margin:10px 0 0"><label class="btn" style="display:inline-flex;align-items:center">Elegir base.json<input type="file" accept=".json,application/json" data-cambio="importar" hidden></label> <span id="progImp" class="nota"></span></p>
+          <p class="nota">Parcelas: elegí <strong>parcelas.json</strong> (misma carpeta). Primero hay que ejecutar <strong>03_parcelas.sql</strong> en Supabase. Se puede repetir para actualizar la capa.</p>
+          <p style="margin:6px 0 0"><label class="btn" style="display:inline-flex;align-items:center">Elegir parcelas.json<input type="file" accept=".json,application/json" data-cambio="importarParc" hidden></label> <span id="progParc" class="nota"></span></p></div>` : ''}
       <div class="sec"><h2>Aplicación</h2><p class="nota" style="margin-top:0">${h(APP.nombre)} ${h(APP.version)}, ${h(APP.municipio)}.</p>
         <div class="fila-btn" style="margin-top:8px">${instalador ? '<button class="btn" data-acc="instalar">Instalar en este equipo</button>' : ''}<button class="btn" data-acc="buscarVersion">Buscar actualización</button></div></div>`;
   },
@@ -504,8 +629,8 @@ function repintarTodo() { pintarPestanas(); pintarEstado(); pintarRed(); pintarI
 
 // ---------- acciones ----------
 const ACC = {
-  red(d) { if (ui.modo) terminarModo(); ui.red = d.red; localStorage.setItem('red', d.red); document.body.dataset.red = d.red; ui.selId = null; ui.ocultos.clear(); ui.vista = 'resumen'; repintarTodo(); $('#panel').scrollTop = 0; },
-  volver() { ui.selId = null; pintarSel(); ir('resumen'); },
+  red(d) { if (ui.modo) terminarModo(); ui.red = d.red; localStorage.setItem('red', d.red); document.body.dataset.red = d.red; ui.selId = null; ui.parcSel = null; pintarParcSel(); ui.ocultos.clear(); ui.vista = 'resumen'; repintarTodo(); $('#panel').scrollTop = 0; },
+  volver() { ui.selId = null; ui.parcSel = null; pintarSel(); pintarParcSel(); ir('resumen'); },
   cuenta() { document.body.classList.remove('panel-min'); etiquetaPanel(); ir('cuenta'); },
   encuadrar() { encuadrar(visibles().map((e) => e.geom)); },
   filtroInt(d) { ui.filtroInt = d.v; pintarInt(); pintarPanel(); },
@@ -588,6 +713,21 @@ const CAMBIO = {
     } catch (e) { aviso(`No se pudo importar: ${e.message}`, { error: true }); if (s) s.textContent = ''; }
     el.value = '';
   },
+  verParc(el) { ui.parcOn = el.checked; localStorage.setItem('parc', el.checked ? '1' : '0'); pintarParc(); if (el.checked && mapa.getZoom() < ZOOM_PARC) aviso(`Acercá el mapa (nivel ${ZOOM_PARC} o más) para ver las parcelas.`); },
+  parcModo(el) { ui.parcModo = el.value; localStorage.setItem('parcModo', el.value); for (const [id, c] of parcDib) c.setStyle(estiloParc(est.parcelas.get(id))); pintarPanel(); },
+  async importarParc(el) {
+    const archivo = el.files[0]; if (!archivo) return;
+    const s = $('#progParc');
+    try {
+      const j = JSON.parse(await archivo.text());
+      if (!confirm(`Se van a cargar ${j.parcelas?.length ?? 0} parcelas${est.modo === 'nube' ? ' en la base compartida' : ' en este equipo'}. ¿Continuar?`)) return;
+      if (s) s.textContent = 'Importando…';
+      const n = await D.importarParcelas(j, (a, b) => { const x = $('#progParc'); if (x) x.textContent = `${a} de ${b}`; });
+      ui.parcOn = true; localStorage.setItem('parc', '1');
+      aviso(`${n} parcelas cargadas. Acercá el mapa para verlas.`);
+    } catch (e) { aviso(`No se pudo importar: ${e.message}`, { error: true }); if (s) s.textContent = ''; }
+    el.value = '';
+  },
   rolDemo(el) { D.cambiarPerfilDemo(el.value); },
   async rolUsuario(el) { try { await D.cambiarRol(el.dataset.id, el.value); aviso('Perfil actualizado'); } catch (e) { aviso(e.message, { error: true }); cargarUsuarios(); } },
 };
@@ -618,6 +758,7 @@ document.addEventListener('submit', async (ev) => {
   } else if (f.dataset.form === 'acceso') accesoEnviar(f);
 });
 document.addEventListener('input', (ev) => {
+  if (ev.target.id === 'buscarParcela') return buscarParcela(ev.target.value);
   if (ev.target.id !== 'buscar') return;
   const q = ev.target.value.trim().toLowerCase(), cont = $('#resultados');
   if (q.length < 2) { cont.innerHTML = ''; return; }
@@ -681,6 +822,7 @@ if ('serviceWorker' in navigator) {
 // ---------- arranque ----------
 D.alCambiar((que) => {
   if (que === 'datos') repintarTodo();
+  else if (que === 'parcelas') { repintarParc(); if (ui.vista === 'resumen' || ui.vista === 'cuenta' || ui.vista === 'parcela') pintarPanel(); }
   else if (que === 'sesion') { pintarAcceso(); repintarTodo(); }
   else { pintarEstado(); if (ui.vista === 'cuenta') pintarPanel(); }
 });
@@ -688,4 +830,4 @@ document.body.dataset.red = ui.red;
 etiquetaPanel();
 D.iniciar().then(() => { pintarAcceso(); repintarTodo(); pintarRef(); })
   .catch((e) => { console.error(e); aviso(`No se pudo iniciar: ${e.message}`, { error: true, fijo: true }); });
-window.__app = { ui, est, mapa, D };
+window.__app = { ui, est, mapa, D, pintarParc };

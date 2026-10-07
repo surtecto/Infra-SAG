@@ -8,6 +8,7 @@ export const est = {
   modo: SUPABASE_URL && SUPABASE_ANON_KEY ? 'nube' : 'local',
   elementos: new Map(),
   intervenciones: new Map(),
+  parcelas: new Map(),   // capa de consulta, la carga el administrador
   perfil: null,          // { id, nombre, email, rol }
   enLinea: navigator.onLine,
   pendientes: 0,
@@ -31,6 +32,7 @@ export async function iniciar() {
   for (const t of ['elementos', 'intervenciones']) for (const f of await db.todos(t)) MAPA[t].set(f.id, f);
   await contarPendientes();
   est.ultimaSync = await db.meta('ultima_sync') || null;
+  db.todos('parcelas').then((l) => { for (const f of l) est.parcelas.set(f.id, f); if (l.length) avisar('parcelas'); }).catch(() => {});
 
   window.addEventListener('online', () => { est.enLinea = true; avisar('conexion'); sincronizar(); });
   window.addEventListener('offline', () => { est.enLinea = false; avisar('conexion'); });
@@ -166,6 +168,7 @@ export function sincronizar() {
     try {
       await enviar();
       const cambios = await traer();
+      try { if (await traerParcelas()) avisar('parcelas'); } catch (e) { if (esDeRed(e)) throw e; console.warn('parcelas', e); }
       est.errorSync = null;
       est.ultimaSync = new Date().toISOString();
       await db.meta('ultima_sync', est.ultimaSync);
@@ -243,6 +246,29 @@ async function traer() {
   return cambios;
 }
 
+// Parcelas: capa de consulta. Se descarga una vez por equipo (unos 6 MB) y después solo llegan los cambios.
+async function traerParcelas() {
+  let cambios = 0;
+  let desde = await db.meta('cursor_parcelas') || { ts: '1970-01-01T00:00:00+00:00', id: '00000000-0000-0000-0000-000000000000' };
+  for (;;) {
+    const { data, error } = await sb.from('parcelas').select('*')
+      .or(`updated_at.gt."${desde.ts}",and(updated_at.eq."${desde.ts}",id.gt."${desde.id}")`)
+      .order('updated_at').order('id').limit(1000);
+    if (error) throw error;
+    if (!data.length) break;
+    const guardar = [];
+    for (const f of data) {
+      if (f.deleted) { est.parcelas.delete(f.id); await db.quitar('parcelas', f.id); } else { est.parcelas.set(f.id, f); guardar.push(f); }
+    }
+    await db.guardarVarios('parcelas', guardar);
+    cambios += data.length;
+    desde = { ts: data[data.length - 1].updated_at, id: data[data.length - 1].id };
+    await db.meta('cursor_parcelas', desde);
+    if (data.length < 1000) break;
+  }
+  return cambios;
+}
+
 export async function descartarRechazados() {
   for (const r of est.rechazados) {
     await db.quitar('pendientes', r.k);
@@ -276,9 +302,34 @@ export async function importarBase(j, progreso) {
   return filas.length;
 }
 
+// Carga de la capa de parcelas (archivo datos_sig/parcelas.json, que NO se publica en la web). Se puede repetir:
+// actualiza las parcelas que ya existen.
+export async function importarParcelas(j, progreso) {
+  if (!Array.isArray(j?.parcelas)) throw new Error('El archivo no tiene el formato esperado (parcelas.json).');
+  const filas = j.parcelas.filter((p) => p.id && p.geom).map((p) => ({
+    id: p.id, cca: p.cca ?? null, partida: p.partida ?? null, tipo: p.tipo ?? null, sup: p.sup ?? null, zona: p.zona ?? null,
+    calle: p.calle ?? null, nro: p.nro ?? null, agua: !!p.agua, cloaca: !!p.cloaca, geom: p.geom, deleted: false }));
+  if (est.modo === 'local') {
+    const ahora = new Date().toISOString();
+    const todas = filas.map((f) => ({ ...f, updated_at: ahora }));
+    await db.guardarVarios('parcelas', todas);
+    for (const f of todas) est.parcelas.set(f.id, f);
+    avisar('parcelas');
+    return filas.length;
+  }
+  for (let i = 0; i < filas.length; i += 250) {
+    const { error } = await sb.from('parcelas').upsert(filas.slice(i, i + 250), { onConflict: 'id' });
+    if (error) throw new Error(/relation .*parcelas|schema cache|Could not find the table/i.test(error.message)
+      ? 'Falta crear la tabla de parcelas: ejecutá el archivo 03_parcelas.sql en Supabase (ver LEEME).' : error.message);
+    progreso?.(Math.min(i + 250, filas.length), filas.length);
+  }
+  await sincronizar();
+  return filas.length;
+}
+
 // Solo modo demostración: borra lo cargado en este equipo.
 export async function reiniciarDemo() {
-  for (const t of ['elementos', 'intervenciones', 'fotos', 'pendientes']) await db.vaciar(t);
-  est.elementos.clear(); est.intervenciones.clear();
+  for (const t of ['elementos', 'intervenciones', 'fotos', 'pendientes', 'parcelas']) await db.vaciar(t);
+  est.elementos.clear(); est.intervenciones.clear(); est.parcelas.clear();
   avisar('datos', {});
 }
